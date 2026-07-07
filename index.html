@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
 <title>受注残明細（スマホ）</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 * { box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
 body { font-family:'Hiragino Sans','Yu Gothic UI','Segoe UI',sans-serif; background:#f0f2f5; color:#1a1a2e; -webkit-text-size-adjust:100%; }
@@ -101,9 +102,9 @@ body { font-family:'Hiragino Sans','Yu Gothic UI','Segoe UI',sans-serif; backgro
   <div class="upload-area" id="uploadArea">
     <div class="upload-icon">📁</div>
     <div class="upload-text">受注残CSVを選択</div>
-    <div class="upload-sub">Shift-JIS形式（tyuzan_*.csv）に対応</div>
+    <div class="upload-sub">Shift-JIS / UTF-8 / xlsx に対応</div>
     <div class="btn-file" id="pickBtn">ファイルを選ぶ</div>
-    <input type="file" id="fileInput" accept=".csv" style="display:none">
+    <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" style="display:none">
   </div>
 
   <div id="dashboard" style="display:none">
@@ -146,33 +147,26 @@ const COLS = [
 ];
 
 function today(){ const d=new Date(); d.setHours(0,0,0,0); return d; }
-let RAW=[], IDX={}, STATE={scope:'open', delayOnly:false, search:'', sort:'amount', collapsed:{}, allCollapsed:true};
+let RAW=[], STATE={scope:'open', delayOnly:false, search:'', sort:'amount', collapsed:{}, allCollapsed:true};
 
-function parseCSV(text){
-  const rows=[]; let row=[], cur='', q=false;
-  for(let i=0;i<text.length;i++){
-    const c=text[i];
-    if(q){ if(c==='"'){ if(text[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=c; }
-    else { if(c==='"') q=true;
-      else if(c===','){ row.push(cur); cur=''; }
-      else if(c==='\r'){}
-      else if(c==='\n'){ row.push(cur); rows.push(row); row=[]; cur=''; }
-      else cur+=c; }
-  }
-  if(cur!==''||row.length){ row.push(cur); rows.push(row); }
-  return rows;
-}
 function parseDate(s){
-  if(!s) return null; s=s.trim(); if(!s) return null;
+  if(s==null) return null; s=String(s).trim(); if(!s) return null;
   let m=s.match(/^(\d{2})\/(\d{1,2})\/(\d{1,2})$/); if(m) return new Date(2000+ +m[1],+m[2]-1,+m[3]);
-  m=s.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/); if(m) return new Date(+m[1],+m[2]-1,+m[3]);
+  m=s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/); if(m) return new Date(+m[1],+m[2]-1,+m[3]);
   return null;
 }
 function fmtDate(s){ const d=parseDate(s); return d?(d.getMonth()+1)+'/'+d.getDate():''; }
 function num(s){ if(s==null) return 0; const n=parseFloat(String(s).replace(/,/g,'')); return isNaN(n)?0:n; }
 function yen(n){ return '¥'+Math.round(n).toLocaleString('ja-JP'); }
+function grPct(v){
+  if(v==null||v==='') return null;
+  if(typeof v==='number') return Math.abs(v)<=1 ? v*100 : v;
+  const s=String(v).trim(); if(!s) return null;
+  if(s.indexOf('%')>=0) return parseFloat(s.replace('%',''));
+  const n=parseFloat(s.replace(/,/g,'')); if(isNaN(n)) return null;
+  return Math.abs(n)<=1 ? n*100 : n;
+}
 
-function buildIndex(header){ IDX={}; header.forEach((h,i)=>IDX[h.trim()]=i); const map={}; COLS.forEach(([jp,key])=>map[key]=(jp in IDX)?IDX[jp]:-1); return map; }
 function status(r){
   if(r.shipDate) return {label:'出荷済',cls:'b-ship'};
   if(r.arriveDate) return {label:'入荷済',cls:'b-arr'};
@@ -182,12 +176,13 @@ function status(r){
 function dueDateStr(r){ return r.custAns || r.custDue; }
 function isOverdue(r){ if(r.shipDate) return false; const d=parseDate(dueDateStr(r)); return d? d<today():false; }
 
-function ingest(rows){
-  const m=buildIndex(rows[0]);
-  const get=(a,k)=> m[k]>=0?(a[m[k]]||'').trim():'';
-  RAW = rows.slice(1).filter(a=>a.length>5 && (get(a,'custName')||get(a,'custCode'))).map(a=>{
-    const o={}; COLS.forEach(([jp,key])=>o[key]=get(a,key));
+// json: XLSX.utils.sheet_to_json による「ヘッダー名キー」のオブジェクト配列
+function ingest(json){
+  RAW = json.filter(row => String(row['得意先名']||row['得意先コード']||'').trim()).map(row=>{
+    const o={}; COLS.forEach(([jp,key])=>{ const v=row[jp]; o[key]= v==null?'':String(v).trim(); });
     o._amount=num(o.amount); o._gross=num(o.grossAmt); o._qty=num(o.qty);
+    o._grPct=grPct(row['粗利率']);
+    o._grStr = (o._grPct==null) ? '-' : (o._grPct.toFixed(2)+'%');
     o._overdue=isOverdue(o); o._status=status(o);
     return o;
   });
@@ -252,7 +247,7 @@ function cards(items){
   return items.map(r=>{
     const st=r._status;
     const due=fmtDate(dueDateStr(r));
-    const grNeg=(r.grossRate&&r.grossRate.indexOf('-')>=0);
+    const grNeg=(r._grPct!=null && r._grPct<0);
     const flow=`${fmtDate(r.poDate)||'―'} → ${fmtDate(r.arriveDate)||'―'} → ${fmtDate(r.shipDate)||fmtDate(r.shipPlan)||'―'}${r.shipDate?'':(r.shipPlan?'(予)':'')}`;
     const memo=[r.memo,r.memo2].filter(Boolean).join(' / ');
     return `<div class="item ${r._overdue?'overdue':''}">
@@ -265,7 +260,7 @@ function cards(items){
       <div class="item-meta">
         <span class="k">数量</span><span class="v">${r._qty?r._qty.toLocaleString():''} ${esc(r.unit)}</span>
         <span class="k">金額</span><span class="v amt">${yen(r._amount)}</span>
-        <span class="k">粗利率</span><span class="v ${grNeg?'neg':''}">${esc(r.grossRate)||'-'}</span>
+        <span class="k">粗利率</span><span class="v ${grNeg?'neg':''}">${r._grStr}</span>
         <span class="k">メーカー</span><span class="v">${esc(r.maker)||'—'}</span>
         <span class="k">仕入先</span><span class="v">${esc(r.supplier)||'—'}</span>
         <span class="k">手配<br><small style="color:#bbb">発注→入荷→出荷</small></span><span class="v flow">${flow}</span>
@@ -279,25 +274,41 @@ function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;'
 function escAttr(s){ return esc(s).replace(/'/g,"\\'"); }
 window.toggle=function(name){ STATE.collapsed[name]=!(STATE.collapsed[name] ?? STATE.allCollapsed); render(); };
 
+// ---- File handling（添付の売上分析ダッシュボードv19と同じ方式）----
 const fileInput=document.getElementById('fileInput'), uploadArea=document.getElementById('uploadArea');
 document.getElementById('pickBtn').onclick=e=>{ e.stopPropagation(); fileInput.click(); };
 uploadArea.onclick=()=>fileInput.click();
-fileInput.onchange=e=>{ if(e.target.files[0]) loadFile(e.target.files[0]); };
-function loadFile(file){
+fileInput.onchange=e=>{ if(e.target.files[0]) readFile(e.target.files[0]); e.target.value=''; };
+
+function readFile(file){
+  const isCSV=/\.csv$/i.test(file.name);
   const reader=new FileReader();
-  reader.onload=e=>{
-    let text; try{ text=new TextDecoder('shift_jis').decode(e.target.result); }catch(err){ text=new TextDecoder('utf-8').decode(e.target.result); }
-    const rows=parseCSV(text);
-    if(rows.length<2){ alert('データが読み取れませんでした。'); return; }
-    ingest(rows);
-    document.getElementById('fileBadge').textContent=file.name+' ｜ '+RAW.length+'明細';
-    document.getElementById('dashboard').style.display='block';
-    uploadArea.style.padding='14px'; uploadArea.querySelector('.upload-text').textContent='別のCSVを読み込む';
-    document.querySelector('.upload-icon').style.display='none';
-    render();
+  reader.onload=ev=>{
+    try{
+      const buf=new Uint8Array(ev.target.result);
+      let wb;
+      if(isCSV){
+        let text=new TextDecoder('utf-8',{fatal:false}).decode(buf);
+        if((text.match(/�/g)||[]).length>5) text=new TextDecoder('shift_jis').decode(buf);
+        if(text.charCodeAt(0)===0xFEFF) text=text.slice(1);
+        wb=XLSX.read(text,{type:'string',cellDates:true,raw:false});
+      } else {
+        wb=XLSX.read(buf,{type:'array',cellDates:true});
+      }
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const json=XLSX.utils.sheet_to_json(ws,{defval:''});
+      if(!json.length){ alert('データが見つかりませんでした。'); return; }
+      ingest(json);
+      document.getElementById('fileBadge').textContent=file.name+' ｜ '+RAW.length+'明細';
+      document.getElementById('dashboard').style.display='block';
+      uploadArea.style.padding='14px'; uploadArea.querySelector('.upload-text').textContent='別のCSVを読み込む';
+      document.querySelector('.upload-icon').style.display='none';
+      render();
+    }catch(e){ alert('読込エラー: '+e.message); }
   };
   reader.readAsArrayBuffer(file);
 }
+
 document.getElementById('search').oninput=e=>{ STATE.search=e.target.value; render(); };
 document.getElementById('delayOnly').onchange=e=>{ STATE.delayOnly=e.target.checked; render(); };
 document.getElementById('sortSel').onchange=e=>{ STATE.sort=e.target.value; render(); };
