@@ -19,13 +19,13 @@ body { font-family:'Hiragino Sans','Yu Gothic UI','Segoe UI',sans-serif; backgro
 .content { padding:12px; }
 
 /* Upload */
-.upload-area { border:2px dashed #0066cc; border-radius:14px; padding:26px 16px; text-align:center;
+.upload-area { display:block; cursor:pointer; border:2px dashed #0066cc; border-radius:14px; padding:26px 16px; text-align:center;
   background:linear-gradient(135deg,#f8f9ff,#eef2ff); margin-bottom:14px; transition:all .2s; }
 .upload-area.drag-over { background:linear-gradient(135deg,#e8f0ff,#dde8ff); border-color:#004db3; transform:scale(1.01); }
 .upload-icon { font-size:34px; margin-bottom:6px; }
 .upload-text { font-size:14px; color:#0066cc; font-weight:700; margin-bottom:4px; }
 .upload-sub { font-size:11px; color:#999; }
-.btn-file { display:inline-block; margin-top:12px; background:#0066cc; color:#fff; padding:11px 22px; border-radius:10px; font-size:14px; font-weight:700; }
+.btn-file { display:inline-block; margin-top:12px; background:#0066cc; color:#fff; padding:12px 24px; border-radius:10px; font-size:15px; font-weight:700; }
 
 /* KPI 2x2 */
 .kpi-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px; }
@@ -99,13 +99,13 @@ body { font-family:'Hiragino Sans','Yu Gothic UI','Segoe UI',sans-serif; backgro
 </div>
 
 <div class="content">
-  <div class="upload-area" id="uploadArea">
+  <label class="upload-area" id="uploadArea">
     <div class="upload-icon">📁</div>
-    <div class="upload-text">CSVをここにドラッグ＆ドロップ、またはタップで選択</div>
+    <div class="upload-text">CSVをタップで選択（ドラッグ＆ドロップも可）</div>
     <div class="upload-sub">Shift-JIS / UTF-8 / xlsx に対応</div>
-    <div class="btn-file" id="pickBtn">ファイルを選ぶ</div>
-    <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" style="display:none">
-  </div>
+    <span class="btn-file">ファイルを選ぶ</span>
+    <input type="file" id="fileInput" style="display:none">
+  </label>
 
   <div id="dashboard" style="display:none">
     <div class="kpi-grid" id="kpiGrid"></div>
@@ -273,41 +273,42 @@ function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;'
 function escAttr(s){ return esc(s).replace(/'/g,"\\'"); }
 window.toggle=function(name){ STATE.collapsed[name]=!(STATE.collapsed[name] ?? STATE.allCollapsed); render(); };
 
-// ---- ファイル読み込み（ドラッグ＆ドロップ / タップ選択）----
+// ---- ファイル読み込み ----
+// タップ選択は <label> のネイティブ動作で開く（AndroidのJSクリック不具合を回避）
 const uploadArea=document.getElementById('uploadArea'), fileInput=document.getElementById('fileInput');
-document.getElementById('pickBtn').onclick=e=>{ e.stopPropagation(); fileInput.click(); };
-uploadArea.onclick=()=>fileInput.click();
-uploadArea.ondragover=e=>{ e.preventDefault(); uploadArea.classList.add('drag-over'); };
-uploadArea.ondragleave=()=>uploadArea.classList.remove('drag-over');
-uploadArea.ondrop=e=>{ e.preventDefault(); uploadArea.classList.remove('drag-over'); if(e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); };
-fileInput.onchange=e=>{ if(e.target.files[0]) readFile(e.target.files[0]); e.target.value=''; };
-// ページ全体へのドロップでも読み込めるように
+fileInput.addEventListener('change', e=>{ const f=e.target.files && e.target.files[0]; if(f) readFile(f); });
+// ドラッグ＆ドロップ（PC/タブレット）。ラベル既定のクリックは阻害しない
+uploadArea.addEventListener('dragover', e=>{ e.preventDefault(); uploadArea.classList.add('drag-over'); });
+uploadArea.addEventListener('dragleave', ()=>uploadArea.classList.remove('drag-over'));
+uploadArea.addEventListener('drop', e=>{ e.preventDefault(); uploadArea.classList.remove('drag-over'); const f=e.dataTransfer && e.dataTransfer.files[0]; if(f) readFile(f); });
 window.addEventListener('dragover', e=>e.preventDefault());
-window.addEventListener('drop', e=>{ e.preventDefault(); if(e.dataTransfer && e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); });
+window.addEventListener('drop', e=>{ e.preventDefault(); const f=e.dataTransfer && e.dataTransfer.files[0]; if(f) readFile(f); });
 
 function applyJson(json, name){
-  if(!json.length){ alert('データが見つかりませんでした。'); return; }
+  if(!json.length){ alert('データが見つかりませんでした。ヘッダー行を含むCSVかご確認ください。'); return; }
   ingest(json);
   document.getElementById('fileBadge').textContent=name+' ｜ '+RAW.length+'明細';
   document.getElementById('dashboard').style.display='block';
   uploadArea.style.padding='14px'; uploadArea.querySelector('.upload-text').textContent='別のCSVを読み込む';
-  document.querySelector('.upload-icon').style.display='none';
+  uploadArea.querySelector('.upload-icon').style.display='none';
   render();
 }
 function readFile(file){
-  const isCSV=/\.csv$/i.test(file.name);
+  const isCSV=/\.csv$/i.test(file.name) || file.type==='text/csv' || file.type==='';
+  const isXlsx=/\.xls[xm]?$/i.test(file.name);
   const reader=new FileReader();
+  reader.onerror=()=>alert('ファイルを開けませんでした。');
   reader.onload=ev=>{
     try{
       const buf=new Uint8Array(ev.target.result);
-      if(isCSV){
+      if(isXlsx){
+        const wb=XLSX.read(buf,{type:'array',cellDates:true});
+        applyJson(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}), file.name);
+      } else {
         let text=new TextDecoder('utf-8',{fatal:false}).decode(buf);
         if((text.match(/�/g)||[]).length>5) text=new TextDecoder('shift_jis').decode(buf);
         if(text.charCodeAt(0)===0xFEFF) text=text.slice(1);
         const wb=XLSX.read(text,{type:'string',cellDates:true,raw:false});
-        applyJson(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}), file.name);
-      } else {
-        const wb=XLSX.read(buf,{type:'array',cellDates:true});
         applyJson(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}), file.name);
       }
     }catch(e){ alert('読込エラー: '+e.message); }
