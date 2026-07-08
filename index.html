@@ -20,7 +20,8 @@ body { font-family:'Hiragino Sans','Yu Gothic UI','Segoe UI',sans-serif; backgro
 
 /* Upload */
 .upload-area { border:2px dashed #0066cc; border-radius:14px; padding:26px 16px; text-align:center;
-  background:linear-gradient(135deg,#f8f9ff,#eef2ff); margin-bottom:14px; }
+  background:linear-gradient(135deg,#f8f9ff,#eef2ff); margin-bottom:14px; transition:all .2s; }
+.upload-area.drag-over { background:linear-gradient(135deg,#e8f0ff,#dde8ff); border-color:#004db3; transform:scale(1.01); }
 .upload-icon { font-size:34px; margin-bottom:6px; }
 .upload-text { font-size:14px; color:#0066cc; font-weight:700; margin-bottom:4px; }
 .upload-sub { font-size:11px; color:#999; }
@@ -88,7 +89,6 @@ body { font-family:'Hiragino Sans','Yu Gothic UI','Segoe UI',sans-serif; backgro
 .empty { text-align:center; padding:50px 20px; color:#aaa; }
 .footer-note { text-align:center; color:#bbb; font-size:11px; margin:18px 0; line-height:1.5; padding:0 10px; }
 
-/* wider screens: keep it centered & readable */
 @media(min-width:640px){ .content{ max-width:560px; margin:0 auto; } }
 </style>
 </head>
@@ -101,7 +101,7 @@ body { font-family:'Hiragino Sans','Yu Gothic UI','Segoe UI',sans-serif; backgro
 <div class="content">
   <div class="upload-area" id="uploadArea">
     <div class="upload-icon">📁</div>
-    <div class="upload-text">受注残CSVを選択</div>
+    <div class="upload-text">CSVをここにドラッグ＆ドロップ、またはタップで選択</div>
     <div class="upload-sub">Shift-JIS / UTF-8 / xlsx に対応</div>
     <div class="btn-file" id="pickBtn">ファイルを選ぶ</div>
     <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" style="display:none">
@@ -176,7 +176,6 @@ function status(r){
 function dueDateStr(r){ return r.custAns || r.custDue; }
 function isOverdue(r){ if(r.shipDate) return false; const d=parseDate(dueDateStr(r)); return d? d<today():false; }
 
-// json: XLSX.utils.sheet_to_json による「ヘッダー名キー」のオブジェクト配列
 function ingest(json){
   RAW = json.filter(row => String(row['得意先名']||row['得意先コード']||'').trim()).map(row=>{
     const o={}; COLS.forEach(([jp,key])=>{ const v=row[jp]; o[key]= v==null?'':String(v).trim(); });
@@ -274,41 +273,49 @@ function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;'
 function escAttr(s){ return esc(s).replace(/'/g,"\\'"); }
 window.toggle=function(name){ STATE.collapsed[name]=!(STATE.collapsed[name] ?? STATE.allCollapsed); render(); };
 
-// ---- File handling（添付の売上分析ダッシュボードv19と同じ方式）----
-const fileInput=document.getElementById('fileInput'), uploadArea=document.getElementById('uploadArea');
+// ---- ファイル読み込み（ドラッグ＆ドロップ / タップ選択）----
+const uploadArea=document.getElementById('uploadArea'), fileInput=document.getElementById('fileInput');
 document.getElementById('pickBtn').onclick=e=>{ e.stopPropagation(); fileInput.click(); };
 uploadArea.onclick=()=>fileInput.click();
+uploadArea.ondragover=e=>{ e.preventDefault(); uploadArea.classList.add('drag-over'); };
+uploadArea.ondragleave=()=>uploadArea.classList.remove('drag-over');
+uploadArea.ondrop=e=>{ e.preventDefault(); uploadArea.classList.remove('drag-over'); if(e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); };
 fileInput.onchange=e=>{ if(e.target.files[0]) readFile(e.target.files[0]); e.target.value=''; };
+// ページ全体へのドロップでも読み込めるように
+window.addEventListener('dragover', e=>e.preventDefault());
+window.addEventListener('drop', e=>{ e.preventDefault(); if(e.dataTransfer && e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]); });
 
+function applyJson(json, name){
+  if(!json.length){ alert('データが見つかりませんでした。'); return; }
+  ingest(json);
+  document.getElementById('fileBadge').textContent=name+' ｜ '+RAW.length+'明細';
+  document.getElementById('dashboard').style.display='block';
+  uploadArea.style.padding='14px'; uploadArea.querySelector('.upload-text').textContent='別のCSVを読み込む';
+  document.querySelector('.upload-icon').style.display='none';
+  render();
+}
 function readFile(file){
   const isCSV=/\.csv$/i.test(file.name);
   const reader=new FileReader();
   reader.onload=ev=>{
     try{
       const buf=new Uint8Array(ev.target.result);
-      let wb;
       if(isCSV){
         let text=new TextDecoder('utf-8',{fatal:false}).decode(buf);
         if((text.match(/�/g)||[]).length>5) text=new TextDecoder('shift_jis').decode(buf);
         if(text.charCodeAt(0)===0xFEFF) text=text.slice(1);
-        wb=XLSX.read(text,{type:'string',cellDates:true,raw:false});
+        const wb=XLSX.read(text,{type:'string',cellDates:true,raw:false});
+        applyJson(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}), file.name);
       } else {
-        wb=XLSX.read(buf,{type:'array',cellDates:true});
+        const wb=XLSX.read(buf,{type:'array',cellDates:true});
+        applyJson(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''}), file.name);
       }
-      const ws=wb.Sheets[wb.SheetNames[0]];
-      const json=XLSX.utils.sheet_to_json(ws,{defval:''});
-      if(!json.length){ alert('データが見つかりませんでした。'); return; }
-      ingest(json);
-      document.getElementById('fileBadge').textContent=file.name+' ｜ '+RAW.length+'明細';
-      document.getElementById('dashboard').style.display='block';
-      uploadArea.style.padding='14px'; uploadArea.querySelector('.upload-text').textContent='別のCSVを読み込む';
-      document.querySelector('.upload-icon').style.display='none';
-      render();
     }catch(e){ alert('読込エラー: '+e.message); }
   };
   reader.readAsArrayBuffer(file);
 }
 
+// ---- controls ----
 document.getElementById('search').oninput=e=>{ STATE.search=e.target.value; render(); };
 document.getElementById('delayOnly').onchange=e=>{ STATE.delayOnly=e.target.checked; render(); };
 document.getElementById('sortSel').onchange=e=>{ STATE.sort=e.target.value; render(); };
